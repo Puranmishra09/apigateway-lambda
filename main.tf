@@ -1,6 +1,29 @@
 provider "aws" {
   region = "us-east-1"
 }
+# Create an S3 bucket for Lambda
+resource "aws_s3_bucket" "lambda_bucket" {
+  bucket = "my-lambda-bucket"
+}
+
+# Upload lambda.zip to S3
+resource "aws_s3_object" "lambda_zip" {
+  bucket = aws_s3_bucket.lambda_bucket.id
+  key    = "lambda.zip"
+  source = "lambda.zip"   # Path to your local file
+  etag   = filemd5("lambda.zip")
+}
+
+# Lambda function referencing S3 bucket
+resource "aws_lambda_function" "puran_lambda" {
+  function_name = "puran_function"
+  handler       = "index.handler"
+  runtime       = "nodejs18.x"
+  role          = aws_iam_role.lambda_role.arn
+
+  s3_bucket = aws_s3_bucket.lambda_bucket.id
+  s3_key    = aws_s3_object.lambda_zip.key
+}
 
 # Create a new IAM Role for Lambda Execution
 resource "aws_iam_role" "lambda_role" {
