@@ -50,15 +50,6 @@ resource "aws_iam_policy_attachment" "lambda_basic_execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# Create Lambda Function
-resource "aws_lambda_function" "puran_lambda" {
-  function_name = "puran_function"
-  handler       = "index.handler"
-  runtime       = "nodejs18.x"
-  role          = aws_iam_role.lambda_role.arn
-  filename      = "lambda.zip"
-}
-
 # Request an ACM Certificate for API Gateway
 resource "aws_acm_certificate" "api_cert" {
   domain_name       = "puran.com"
