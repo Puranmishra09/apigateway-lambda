@@ -1,14 +1,25 @@
-output "api_gateway_url" {
-  description = "The API Gateway Invoke URL"
-  value       = aws_apigatewayv2_stage.puran_stage.invoke_url
+variable "region" {
+  description = "AWS region"
+  default     = "us-east-1"
 }
 
-output "custom_domain_url" {
-  description = "The custom domain URL for API Gateway"
-  value       = "https://${aws_apigatewayv2_domain_name.puran_domain.domain_name}"
+variable "vpc_id" {
+  description = "VPC ID where NLB and Lambda will be deployed"
 }
 
-output "lambda_arn" {
-  description = "ARN of the deployed Lambda function"
-  value       = aws_lambda_function.puran_lambda.arn
+variable "subnet_ids" {
+  description = "List of Subnet IDs for the Load Balancer"
+  type        = list(string)
+}
+
+variable "lambda_s3_bucket" {
+  description = "S3 bucket storing Lambda zip file"
+}
+
+variable "lambda_s3_key" {
+  description = "S3 object key for Lambda zip file"
+}
+
+variable "domain_name" {
+  description = "Custom domain for API Gateway"
 }
