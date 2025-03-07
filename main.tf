@@ -1,97 +1,111 @@
 provider "aws" {
-  region = var.region
+  region = "us-east-1"
 }
 
-# IAM Role for Lambda
-resource "aws_iam_role" "lambda_role" {
-  name = "lambda_execution_role"
-
-  assume_role_policy = <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Action": "sts:AssumeRole",
-      "Principal": {
-        "Service": "lambda.amazonaws.com"
-      },
-      "Effect": "Allow"
-    }
-  ]
-}
-EOF
+# Route 53 Hosted Zone (Ensure your domain is registered)
+resource "aws_route53_zone" "puran" {
+  name = "puran.com"
 }
 
-# Attach policy for Lambda permissions
-resource "aws_iam_policy_attachment" "lambda_policy" {
-  name       = "lambda-policy-attachment"
-  roles      = [aws_iam_role.lambda_role.name]
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-}
+# SSL Certificate for API Gateway
+resource "aws_acm_certificate" "puran_cert" {
+  domain_name       = "puran.com"
+  validation_method = "DNS"
 
-# Lambda Function
-resource "aws_lambda_function" "my_lambda" {
-  function_name = "my_lambda_function"
-  role          = aws_iam_role.lambda_role.arn
-
-  s3_bucket     = var.lambda_s3_bucket
-  s3_key        = var.lambda_s3_key
-
-  handler       = "lambda_function.lambda_handler"
-  runtime       = "python3.9"
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # API Gateway
-resource "aws_api_gateway_rest_api" "my_api" {
-  name        = "MyAPIGateway"
-  description = "API Gateway for Lambda behind VPC Link"
+resource "aws_apigatewayv2_api" "puran_api" {
+  name          = "puran-api"
+  protocol_type = "HTTP"
 }
 
-# VPC Link for API Gateway (to connect with NLB)
-resource "aws_api_gateway_vpc_link" "vpc_link" {
-  name        = "my-vpc-link"
-  target_arns = [aws_lb.nlb.arn]
+# API Gateway Stage
+resource "aws_apigatewayv2_stage" "puran_stage" {
+  api_id      = aws_apigatewayv2_api.puran_api.id
+  name        = "prod"
+  auto_deploy = true
 }
 
-# Network Load Balancer (NLB)
-resource "aws_lb" "nlb" {
-  name               = "my-nlb"
-  internal           = false
-  load_balancer_type = "network"
-  subnets            = var.subnet_ids
+# API Gateway Custom Domain Name
+resource "aws_apigatewayv2_domain_name" "puran_domain" {
+  domain_name = "puran.com"
+
+  domain_name_configuration {
+    certificate_arn = aws_acm_certificate.puran_cert.arn
+    endpoint_type   = "REGIONAL"
+    security_policy = "TLS_1_2"
+  }
 }
 
-# Target Group for NLB
-resource "aws_lb_target_group" "nlb_target_group" {
-  name     = "nlb-target-group"
-  port     = 80
-  protocol = "HTTP"
-  vpc_id   = var.vpc_id
-}
-
-# Register Lambda as a Target in NLB
-resource "aws_lb_target_group_attachment" "lambda_attachment" {
-  target_group_arn = aws_lb_target_group.nlb_target_group.arn
-  target_id        = aws_lambda_function.my_lambda.arn
-}
-
-# Route53 Record for Custom Domain
+# Route 53 Record for API Gateway
 resource "aws_route53_record" "api_record" {
-  zone_id = data.aws_route53_zone.my_zone.zone_id
-  name    = var.domain_name
+  zone_id = aws_route53_zone.puran.zone_id
+  name    = "puran.com"
   type    = "A"
 
   alias {
-    name                   = aws_api_gateway_domain_name.my_custom_domain.cloudfront_domain_name
-    zone_id                = aws_api_gateway_domain_name.my_custom_domain.cloudfront_zone_id
+    name                   = aws_apigatewayv2_domain_name.puran_domain.domain_name_configuration[0].target_domain_name
+    zone_id                = aws_apigatewayv2_domain_name.puran_domain.domain_name_configuration[0].hosted_zone_id
     evaluate_target_health = false
   }
 }
 
-data "aws_route53_zone" "my_zone" {
-  name = var.domain_name
+# Lambda Function
+resource "aws_lambda_function" "puran_lambda" {
+  function_name    = "puran_function"
+  role            = aws_iam_role.lambda_exec.arn
+  handler        = "index.handler"
+  runtime        = "nodejs18.x"
+  filename       = "lambda.zip"
+  source_code_hash = filebase64sha256("lambda.zip")
 }
 
-resource "aws_api_gateway_domain_name" "my_custom_domain" {
-  domain_name = var.domain_name
+# Lambda Permission for API Gateway
+resource "aws_lambda_permission" "apigw_lambda" {
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.puran_lambda.function_name
+  principal     = "apigateway.amazonaws.com"
+}
+
+# API Gateway Integration with Lambda
+resource "aws_apigatewayv2_integration" "puran_lambda_integration" {
+  api_id           = aws_apigatewayv2_api.puran_api.id
+  integration_type = "AWS_PROXY"
+  integration_uri  = aws_lambda_function.puran_lambda.invoke_arn
+}
+
+# API Gateway Route
+resource "aws_apigatewayv2_route" "puran_route" {
+  api_id    = aws_apigatewayv2_api.puran_api.id
+  route_key = "ANY /"
+  target    = "integrations/${aws_apigatewayv2_integration.puran_lambda_integration.id}"
+}
+
+# IAM Role for Lambda Execution
+resource "aws_iam_role" "lambda_exec" {
+  name = "lambda_exec_role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+# IAM Policy for Lambda
+resource "aws_iam_policy_attachment" "lambda_policy_attach" {
+  name       = "lambda_policy_attachment"
+  roles      = [aws_iam_role.lambda_exec.name]
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
