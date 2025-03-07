@@ -1,18 +1,37 @@
+# ==============================
+# ✅ Provider Configuration
+# ==============================
 provider "aws" {
   region = "us-east-1"
 }
 
-# ✅ Create Security Group for Lambda
+# ==============================
+# ✅ VPC Configuration (Modify if needed)
+# ==============================
+data "aws_vpc" "default" {
+  default = true
+}
+
+data "aws_subnets" "default" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.default.id]
+  }
+}
+
+# ==============================
+# ✅ Security Group for Lambda
+# ==============================
 resource "aws_security_group" "lambda_sg" {
   name        = "lambda-security-group"
-  description = "Allow traffic from NLB"
-  vpc_id      = var.vpc_id
+  description = "Allow Lambda to access NLB"
+  vpc_id      = data.aws_vpc.default.id
 
   ingress {
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
-    security_groups = [aws_security_group.nlb_sg.id] # Accept traffic from NLB
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
   egress {
@@ -23,37 +42,67 @@ resource "aws_security_group" "lambda_sg" {
   }
 }
 
-# ✅ Create Security Group for NLB
-resource "aws_security_group" "nlb_sg" {
-  name        = "nlb-security-group"
-  description = "Allow API Gateway traffic"
-  vpc_id      = var.vpc_id
+# ==============================
+# ✅ IAM Role for Lambda Execution
+# ==============================
+resource "aws_iam_role" "lambda_role" {
+  name = "lambda_execution_role"
 
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]  # Allow traffic from API Gateway
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      }
+    ]
+  })
 }
 
-# ✅ Create Network Load Balancer
-resource "aws_lb" "my_nlb" {
-  name               = "my-nlb"
-  internal           = true
-  load_balancer_type = "network"
-  subnets            = var.subnet_ids
-  security_groups    = [aws_security_group.nlb_sg.id]
+resource "aws_iam_policy" "lambda_vpc_policy" {
+  name        = "lambda-vpc-policy"
+  description = "Policy for Lambda to access VPC and write logs"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ec2:CreateNetworkInterface",
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:DeleteNetworkInterface"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = "logs:CreateLogGroup"
+        Resource = "arn:aws:logs:*:*:*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "arn:aws:logs:*:*:log-group:/aws/lambda/*"
+      }
+    ]
+  })
 }
 
-# ✅ Create Lambda in VPC
+resource "aws_iam_role_policy_attachment" "lambda_policy_attach" {
+  role       = aws_iam_role.lambda_role.name
+  policy_arn = aws_iam_policy.lambda_vpc_policy.arn
+}
+
+# ==============================
+# ✅ Lambda Function in VPC
+# ==============================
 resource "aws_lambda_function" "my_lambda" {
   function_name = "web-service-lambda"
   filename      = "lambda.zip"
@@ -62,84 +111,104 @@ resource "aws_lambda_function" "my_lambda" {
   role          = aws_iam_role.lambda_role.arn
 
   vpc_config {
-    subnet_ids         = var.subnet_ids
+    subnet_ids         = data.aws_subnets.default.ids
     security_group_ids = [aws_security_group.lambda_sg.id]
   }
 }
 
-# ✅ Create API Gateway
-resource "aws_api_gateway_rest_api" "api" {
-  name        = "MyAPIGateway"
-  description = "API Gateway with VPC Link"
+# ==============================
+# ✅ Network Load Balancer (NLB)
+# ==============================
+resource "aws_lb" "nlb" {
+  name               = "nlb-for-lambda"
+  internal           = false
+  load_balancer_type = "network"
+  subnets            = data.aws_subnets.default.ids
 }
 
-# ✅ Create VPC Link for API Gateway → NLB
-resource "aws_api_gateway_vpc_link" "vpc_link" {
-  name        = "my-vpc-link"
-  target_arns = [aws_lb.my_nlb.arn]
+resource "aws_lb_target_group" "tg" {
+  name     = "lambda-tg"
+  port     = 80
+  protocol = "TCP"
+  vpc_id   = data.aws_vpc.default.id
 }
 
-# ✅ Create API Gateway Custom Domain Name
-resource "aws_api_gateway_domain_name" "custom_domain" {
-  domain_name     = var.api_subdomain
-  certificate_arn = aws_acm_certificate_validation.cert.certificate_arn
-}
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.nlb.arn
+  port              = 80
+  protocol          = "TCP"
 
-# ✅ Create API Gateway Base Path Mapping
-resource "aws_api_gateway_base_path_mapping" "mapping" {
-  domain_name = aws_api_gateway_domain_name.custom_domain.domain_name
-  api_id      = aws_api_gateway_rest_api.api.id
-  stage_name  = "prod"
-}
-
-# ✅ Route 53 Hosted Zone (Skip if already exists)
-resource "aws_route53_zone" "my_zone" {
-  name = var.domain_name
-}
-
-# ✅ ACM SSL Certificate
-resource "aws_acm_certificate" "cert" {
-  domain_name       = var.domain_name
-  validation_method = "DNS"
-
-  lifecycle {
-    create_before_destroy = true
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.tg.arn
   }
 }
 
-# ✅ Create Route 53 DNS Record for ACM Validation
-resource "aws_route53_record" "cert_validation" {
-  for_each = {
-    for dvo in aws_acm_certificate.cert.domain_validation_options :
-    dvo.domain_name => {
-      name   = dvo.resource_record_name
-      type   = dvo.resource_record_type
-      record = dvo.resource_record_value
-    }
+# ==============================
+# ✅ API Gateway with VPC Link
+# ==============================
+resource "aws_apigatewayv2_vpc_link" "vpc_link" {
+  name               = "api-vpc-link"
+  security_group_ids = [aws_security_group.lambda_sg.id]
+  subnet_ids         = data.aws_subnets.default.ids
+}
+
+resource "aws_apigatewayv2_api" "http_api" {
+  name          = "lambda-api"
+  protocol_type = "HTTP"
+}
+
+resource "aws_apigatewayv2_stage" "default" {
+  api_id      = aws_apigatewayv2_api.http_api.id
+  name        = "$default"
+  auto_deploy = true
+}
+
+resource "aws_apigatewayv2_integration" "lambda_integration" {
+  api_id           = aws_apigatewayv2_api.http_api.id
+  integration_type = "HTTP_PROXY"
+  connection_type  = "VPC_LINK"
+  connection_id    = aws_apigatewayv2_vpc_link.vpc_link.id
+  integration_uri  = aws_lb.nlb.arn
+}
+
+resource "aws_apigatewayv2_route" "lambda_route" {
+  api_id    = aws_apigatewayv2_api.http_api.id
+  route_key = "ANY /{proxy+}"
+  target    = "integrations/${aws_apigatewayv2_integration.lambda_integration.id}"
+}
+
+# ==============================
+# ✅ Route 53 for Custom Domain
+# ==============================
+resource "aws_route53_zone" "my_domain" {
+  name = "mycustomdomain.com"
+}
+
+resource "aws_apigatewayv2_domain_name" "api_custom_domain" {
+  domain_name = "api.mycustomdomain.com"
+
+  domain_name_configuration {
+    certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/your-cert-id"  # Replace with your ACM cert ARN
+    endpoint_type   = "REGIONAL"
+    security_policy = "TLS_1_2"
   }
-
-  zone_id = aws_route53_zone.my_zone.zone_id
-  name    = each.value.name
-  type    = each.value.type
-  records = [each.value.record]
-  ttl     = 60
 }
 
-# ✅ Validate ACM Certificate
-resource "aws_acm_certificate_validation" "cert" {
-  certificate_arn         = aws_acm_certificate.cert.arn
-  validation_record_fqdns = [for record in aws_route53_record.cert_validation : record.fqdn]
+resource "aws_apigatewayv2_api_mapping" "api_mapping" {
+  api_id      = aws_apigatewayv2_api.http_api.id
+  domain_name = aws_apigatewayv2_domain_name.api_custom_domain.id
+  stage       = aws_apigatewayv2_stage.default.id
 }
 
-# ✅ Create Route 53 Alias Record to Point to API Gateway
-resource "aws_route53_record" "api_record" {
-  zone_id = aws_route53_zone.my_zone.zone_id
-  name    = var.api_subdomain
+resource "aws_route53_record" "api_dns" {
+  zone_id = aws_route53_zone.my_domain.zone_id
+  name    = "api.mycustomdomain.com"
   type    = "A"
 
   alias {
-    name                   = aws_api_gateway_domain_name.custom_domain.cloudfront_domain_name
-    zone_id                = aws_api_gateway_domain_name.custom_domain.cloudfront_zone_id
+    name                   = aws_apigatewayv2_domain_name.api_custom_domain.domain_name_configuration[0].target_domain_name
+    zone_id                = aws_apigatewayv2_domain_name.api_custom_domain.domain_name_configuration[0].hosted_zone_id
     evaluate_target_health = false
   }
 }
