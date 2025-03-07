@@ -1,35 +1,31 @@
-# ==============================
-# ✅ Provider Configuration
-# ==============================
 provider "aws" {
   region = "us-east-1"
 }
 
-# ==============================
-# ✅ VPC Configuration (Modify if needed)
-# ==============================
-data "aws_vpc" "default" {
-  default = true
+# VPC
+resource "aws_vpc" "my_vpc" {
+  cidr_block = "10.0.0.0/16"
 }
 
-data "aws_subnets" "default" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
-  }
+# Subnets
+resource "aws_subnet" "public_subnet" {
+  vpc_id                  = aws_vpc.my_vpc.id
+  cidr_block              = "10.0.1.0/24"
+  map_public_ip_on_launch = true
 }
 
-# ==============================
-# ✅ Security Group for Lambda
-# ==============================
+resource "aws_subnet" "private_subnet" {
+  vpc_id     = aws_vpc.my_vpc.id
+  cidr_block = "10.0.2.0/24"
+}
+
+# Security Group for Lambda
 resource "aws_security_group" "lambda_sg" {
-  name        = "lambda-security-group"
-  description = "Allow Lambda to access NLB"
-  vpc_id      = data.aws_vpc.default.id
+  vpc_id = aws_vpc.my_vpc.id
 
   ingress {
-    from_port   = 80
-    to_port     = 80
+    from_port   = 443
+    to_port     = 443
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -42,173 +38,106 @@ resource "aws_security_group" "lambda_sg" {
   }
 }
 
-# ==============================
-# ✅ IAM Role for Lambda Execution
-# ==============================
-resource "aws_iam_role" "lambda_role" {
-  name = "lambda_execution_role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "lambda.amazonaws.com"
-        }
-      }
-    ]
-  })
+# Network Load Balancer
+resource "aws_lb" "my_nlb" {
+  name               = "my-nlb"
+  internal           = false
+  load_balancer_type = "network"
+  subnets           = [aws_subnet.public_subnet.id]
 }
 
-resource "aws_iam_policy" "lambda_vpc_policy" {
-  name        = "lambda-vpc-policy"
-  description = "Policy for Lambda to access VPC and write logs"
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "ec2:CreateNetworkInterface",
-          "ec2:DescribeNetworkInterfaces",
-          "ec2:DeleteNetworkInterface"
-        ]
-        Resource = "*"
-      },
-      {
-        Effect = "Allow"
-        Action = "logs:CreateLogGroup"
-        Resource = "arn:aws:logs:*:*:*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "logs:CreateLogStream",
-          "logs:PutLogEvents"
-        ]
-        Resource = "arn:aws:logs:*:*:log-group:/aws/lambda/*"
-      }
-    ]
-  })
+# NLB Target Group
+resource "aws_lb_target_group" "my_tg" {
+  name     = "my-tg"
+  port     = 80
+  protocol = "TCP"
+  vpc_id   = aws_vpc.my_vpc.id
 }
 
-resource "aws_iam_role_policy_attachment" "lambda_policy_attach" {
-  role       = aws_iam_role.lambda_role.name
-  policy_arn = aws_iam_policy.lambda_vpc_policy.arn
+# Target Group Attachment (Lambda through VPC Link)
+resource "aws_lb_target_group_attachment" "lambda_attachment" {
+  target_group_arn = aws_lb_target_group.my_tg.arn
+  target_id        = aws_lambda_function.my_lambda.arn
 }
 
-# ==============================
-# ✅ Lambda Function in VPC
-# ==============================
+# API Gateway VPC Link
+resource "aws_apigatewayv2_vpc_link" "my_vpc_link" {
+  name        = "my-vpc-link"
+  subnet_ids  = [aws_subnet.private_subnet.id]
+  security_group_ids = [aws_security_group.lambda_sg.id]
+}
+
+# Lambda Function
 resource "aws_lambda_function" "my_lambda" {
   function_name = "web-service-lambda"
-  filename      = "lambda.zip"
-  handler       = "index.handler"
-  runtime       = "nodejs18.x"
+  runtime       = "python3.8"
   role          = aws_iam_role.lambda_role.arn
-
+  handler       = "lambda_function.lambda_handler"
+  filename      = "lambda.zip"
   vpc_config {
-    subnet_ids         = data.aws_subnets.default.ids
+    subnet_ids         = [aws_subnet.private_subnet.id]
     security_group_ids = [aws_security_group.lambda_sg.id]
   }
 }
 
-# ==============================
-# ✅ Network Load Balancer (NLB)
-# ==============================
-resource "aws_lb" "nlb" {
-  name               = "nlb-for-lambda"
-  internal           = false
-  load_balancer_type = "network"
-  subnets            = data.aws_subnets.default.ids
-}
-
-resource "aws_lb_target_group" "tg" {
-  name     = "lambda-tg"
-  port     = 80
-  protocol = "TCP"
-  vpc_id   = data.aws_vpc.default.id
-}
-
-resource "aws_lb_listener" "http" {
-  load_balancer_arn = aws_lb.nlb.arn
-  port              = 80
-  protocol          = "TCP"
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.tg.arn
-  }
-}
-
-# ==============================
-# ✅ API Gateway with VPC Link
-# ==============================
-resource "aws_apigatewayv2_vpc_link" "vpc_link" {
-  name               = "api-vpc-link"
-  security_group_ids = [aws_security_group.lambda_sg.id]
-  subnet_ids         = data.aws_subnets.default.ids
-}
-
-resource "aws_apigatewayv2_api" "http_api" {
-  name          = "lambda-api"
+# API Gateway
+resource "aws_apigatewayv2_api" "my_api" {
+  name          = "MyAPI"
   protocol_type = "HTTP"
 }
 
-resource "aws_apigatewayv2_stage" "default" {
-  api_id      = aws_apigatewayv2_api.http_api.id
-  name        = "$default"
-  auto_deploy = true
-}
-
+# API Gateway Integration
 resource "aws_apigatewayv2_integration" "lambda_integration" {
-  api_id           = aws_apigatewayv2_api.http_api.id
+  api_id           = aws_apigatewayv2_api.my_api.id
   integration_type = "HTTP_PROXY"
+  integration_uri  = aws_lb.my_nlb.arn
   connection_type  = "VPC_LINK"
-  connection_id    = aws_apigatewayv2_vpc_link.vpc_link.id
-  integration_uri  = aws_lb.nlb.arn
+  connection_id    = aws_apigatewayv2_vpc_link.my_vpc_link.id
 }
 
+# API Gateway Route
 resource "aws_apigatewayv2_route" "lambda_route" {
-  api_id    = aws_apigatewayv2_api.http_api.id
-  route_key = "ANY /{proxy+}"
+  api_id    = aws_apigatewayv2_api.my_api.id
+  route_key = "GET /"
   target    = "integrations/${aws_apigatewayv2_integration.lambda_integration.id}"
 }
 
-# ==============================
-# ✅ Route 53 for Custom Domain
-# ==============================
-resource "aws_route53_zone" "my_domain" {
-  name = "mycustomdomain.com"
+# API Gateway Stage
+resource "aws_apigatewayv2_stage" "default_stage" {
+  api_id      = aws_apigatewayv2_api.my_api.id
+  name        = "default"
+  auto_deploy = true
 }
 
-resource "aws_apigatewayv2_domain_name" "api_custom_domain" {
-  domain_name = "api.mycustomdomain.com"
+# IAM Role for Lambda
+resource "aws_iam_role" "lambda_role" {
+  name = "lambda-role"
 
-  domain_name_configuration {
-    certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/your-cert-id"  # Replace with your ACM cert ARN
-    endpoint_type   = "REGIONAL"
-    security_policy = "TLS_1_2"
-  }
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+    }]
+  })
 }
 
-resource "aws_apigatewayv2_api_mapping" "api_mapping" {
-  api_id      = aws_apigatewayv2_api.http_api.id
-  domain_name = aws_apigatewayv2_domain_name.api_custom_domain.id
-  stage       = aws_apigatewayv2_stage.default.id
+# IAM Policy for Lambda
+resource "aws_iam_policy" "lambda_policy" {
+  name = "lambda-policy"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action   = "logs:CreateLogGroup"
+      Effect   = "Allow"
+      Resource = "*"
+    }]
+  })
 }
 
-resource "aws_route53_record" "api_dns" {
-  zone_id = aws_route53_zone.my_domain.zone_id
-  name    = "api.mycustomdomain.com"
-  type    = "A"
-
-  alias {
-    name                   = aws_apigatewayv2_domain_name.api_custom_domain.domain_name_configuration[0].target_domain_name
-    zone_id                = aws_apigatewayv2_domain_name.api_custom_domain.domain_name_configuration[0].hosted_zone_id
-    evaluate_target_health = false
-  }
+resource "aws_iam_role_policy_attachment" "lambda_attach" {
+  role       = aws_iam_role.lambda_role.name
+  policy_arn = aws_iam_policy.lambda_policy.arn
 }
