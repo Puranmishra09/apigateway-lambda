@@ -1,143 +1,97 @@
 provider "aws" {
-  region = "us-east-1"
-}
-
-# VPC
-resource "aws_vpc" "my_vpc" {
-  cidr_block = "10.0.0.0/16"
-}
-
-# Subnets
-resource "aws_subnet" "public_subnet" {
-  vpc_id                  = aws_vpc.my_vpc.id
-  cidr_block              = "10.0.1.0/24"
-  map_public_ip_on_launch = true
-}
-
-resource "aws_subnet" "private_subnet" {
-  vpc_id     = aws_vpc.my_vpc.id
-  cidr_block = "10.0.2.0/24"
-}
-
-# Security Group for Lambda
-resource "aws_security_group" "lambda_sg" {
-  vpc_id = aws_vpc.my_vpc.id
-
-  ingress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
-
-# Network Load Balancer
-resource "aws_lb" "my_nlb" {
-  name               = "my-nlb"
-  internal           = false
-  load_balancer_type = "network"
-  subnets           = [aws_subnet.public_subnet.id]
-}
-
-# NLB Target Group
-resource "aws_lb_target_group" "my_tg" {
-  name     = "my-tg"
-  port     = 80
-  protocol = "TCP"
-  vpc_id   = aws_vpc.my_vpc.id
-}
-
-# Target Group Attachment (Lambda through VPC Link)
-resource "aws_lb_target_group_attachment" "lambda_attachment" {
-  target_group_arn = aws_lb_target_group.my_tg.arn
-  target_id        = aws_lambda_function.my_lambda.arn
-}
-
-# API Gateway VPC Link
-resource "aws_apigatewayv2_vpc_link" "my_vpc_link" {
-  name        = "my-vpc-link"
-  subnet_ids  = [aws_subnet.private_subnet.id]
-  security_group_ids = [aws_security_group.lambda_sg.id]
-}
-
-# Lambda Function
-resource "aws_lambda_function" "my_lambda" {
-  function_name = "web-service-lambda"
-  runtime       = "python3.8"
-  role          = aws_iam_role.lambda_role.arn
-  handler       = "lambda_function.lambda_handler"
-  filename      = "lambda.zip"
-  vpc_config {
-    subnet_ids         = [aws_subnet.private_subnet.id]
-    security_group_ids = [aws_security_group.lambda_sg.id]
-  }
-}
-
-# API Gateway
-resource "aws_apigatewayv2_api" "my_api" {
-  name          = "MyAPI"
-  protocol_type = "HTTP"
-}
-
-# API Gateway Integration
-resource "aws_apigatewayv2_integration" "lambda_integration" {
-  api_id           = aws_apigatewayv2_api.my_api.id
-  integration_type = "HTTP_PROXY"
-  integration_uri  = aws_lb.my_nlb.arn
-  connection_type  = "VPC_LINK"
-  connection_id    = aws_apigatewayv2_vpc_link.my_vpc_link.id
-}
-
-# API Gateway Route
-resource "aws_apigatewayv2_route" "lambda_route" {
-  api_id    = aws_apigatewayv2_api.my_api.id
-  route_key = "GET /"
-  target    = "integrations/${aws_apigatewayv2_integration.lambda_integration.id}"
-}
-
-# API Gateway Stage
-resource "aws_apigatewayv2_stage" "default_stage" {
-  api_id      = aws_apigatewayv2_api.my_api.id
-  name        = "default"
-  auto_deploy = true
+  region = var.region
 }
 
 # IAM Role for Lambda
 resource "aws_iam_role" "lambda_role" {
-  name = "lambda-role"
+  name = "lambda_execution_role"
 
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
-      Principal = { Service = "lambda.amazonaws.com" }
-    }]
-  })
+  assume_role_policy = <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Action": "sts:AssumeRole",
+      "Principal": {
+        "Service": "lambda.amazonaws.com"
+      },
+      "Effect": "Allow"
+    }
+  ]
+}
+EOF
 }
 
-# IAM Policy for Lambda
-resource "aws_iam_policy" "lambda_policy" {
-  name = "lambda-policy"
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action   = "logs:CreateLogGroup"
-      Effect   = "Allow"
-      Resource = "*"
-    }]
-  })
+# Attach policy for Lambda permissions
+resource "aws_iam_policy_attachment" "lambda_policy" {
+  name       = "lambda-policy-attachment"
+  roles      = [aws_iam_role.lambda_role.name]
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-resource "aws_iam_role_policy_attachment" "lambda_attach" {
-  role       = aws_iam_role.lambda_role.name
-  policy_arn = aws_iam_policy.lambda_policy.arn
+# Lambda Function
+resource "aws_lambda_function" "my_lambda" {
+  function_name = "my_lambda_function"
+  role          = aws_iam_role.lambda_role.arn
+
+  s3_bucket     = var.lambda_s3_bucket
+  s3_key        = var.lambda_s3_key
+
+  handler       = "lambda_function.lambda_handler"
+  runtime       = "python3.9"
+}
+
+# API Gateway
+resource "aws_api_gateway_rest_api" "my_api" {
+  name        = "MyAPIGateway"
+  description = "API Gateway for Lambda behind VPC Link"
+}
+
+# VPC Link for API Gateway (to connect with NLB)
+resource "aws_api_gateway_vpc_link" "vpc_link" {
+  name        = "my-vpc-link"
+  target_arns = [aws_lb.nlb.arn]
+}
+
+# Network Load Balancer (NLB)
+resource "aws_lb" "nlb" {
+  name               = "my-nlb"
+  internal           = false
+  load_balancer_type = "network"
+  subnets            = var.subnet_ids
+}
+
+# Target Group for NLB
+resource "aws_lb_target_group" "nlb_target_group" {
+  name     = "nlb-target-group"
+  port     = 80
+  protocol = "HTTP"
+  vpc_id   = var.vpc_id
+}
+
+# Register Lambda as a Target in NLB
+resource "aws_lb_target_group_attachment" "lambda_attachment" {
+  target_group_arn = aws_lb_target_group.nlb_target_group.arn
+  target_id        = aws_lambda_function.my_lambda.arn
+}
+
+# Route53 Record for Custom Domain
+resource "aws_route53_record" "api_record" {
+  zone_id = data.aws_route53_zone.my_zone.zone_id
+  name    = var.domain_name
+  type    = "A"
+
+  alias {
+    name                   = aws_api_gateway_domain_name.my_custom_domain.cloudfront_domain_name
+    zone_id                = aws_api_gateway_domain_name.my_custom_domain.cloudfront_zone_id
+    evaluate_target_health = false
+  }
+}
+
+data "aws_route53_zone" "my_zone" {
+  name = var.domain_name
+}
+
+resource "aws_api_gateway_domain_name" "my_custom_domain" {
+  domain_name = var.domain_name
 }
