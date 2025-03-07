@@ -2,92 +2,9 @@ provider "aws" {
   region = "us-east-1"
 }
 
-# Route 53 Hosted Zone (Ensure your domain is registered)
-resource "aws_route53_zone" "puran" {
-  name = "puran.com"
-}
-
-# SSL Certificate for API Gateway
-resource "aws_acm_certificate" "puran_cert" {
-  domain_name       = "puran.com"
-  validation_method = "DNS"
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-# API Gateway
-resource "aws_apigatewayv2_api" "puran_api" {
-  name          = "puran-api"
-  protocol_type = "HTTP"
-}
-
-# API Gateway Stage
-resource "aws_apigatewayv2_stage" "puran_stage" {
-  api_id      = aws_apigatewayv2_api.puran_api.id
-  name        = "prod"
-  auto_deploy = true
-}
-
-# API Gateway Custom Domain Name
-resource "aws_apigatewayv2_domain_name" "puran_domain" {
-  domain_name = "puran.com"
-
-  domain_name_configuration {
-    certificate_arn = aws_acm_certificate.puran_cert.arn
-    endpoint_type   = "REGIONAL"
-    security_policy = "TLS_1_2"
-  }
-}
-
-# Route 53 Record for API Gateway
-resource "aws_route53_record" "api_record" {
-  zone_id = aws_route53_zone.puran.zone_id
-  name    = "puran.com"
-  type    = "A"
-
-  alias {
-    name                   = aws_apigatewayv2_domain_name.puran_domain.domain_name_configuration[0].target_domain_name
-    zone_id                = aws_apigatewayv2_domain_name.puran_domain.domain_name_configuration[0].hosted_zone_id
-    evaluate_target_health = false
-  }
-}
-
-# Lambda Function
-resource "aws_lambda_function" "puran_lambda" {
-  function_name    = "puran_function"
-  role            = aws_iam_role.lambda_exec.arn
-  handler        = "index.handler"
-  runtime        = "nodejs18.x"
-  filename       = "lambda.zip"
-  source_code_hash = filebase64sha256("lambda.zip")
-}
-
-# Lambda Permission for API Gateway
-resource "aws_lambda_permission" "apigw_lambda" {
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.puran_lambda.function_name
-  principal     = "apigateway.amazonaws.com"
-}
-
-# API Gateway Integration with Lambda
-resource "aws_apigatewayv2_integration" "puran_lambda_integration" {
-  api_id           = aws_apigatewayv2_api.puran_api.id
-  integration_type = "AWS_PROXY"
-  integration_uri  = aws_lambda_function.puran_lambda.invoke_arn
-}
-
-# API Gateway Route
-resource "aws_apigatewayv2_route" "puran_route" {
-  api_id    = aws_apigatewayv2_api.puran_api.id
-  route_key = "ANY /"
-  target    = "integrations/${aws_apigatewayv2_integration.puran_lambda_integration.id}"
-}
-
-# IAM Role for Lambda Execution
-resource "aws_iam_role" "lambda_exec" {
-  name = "lambda_exec_role"
+# Create a new IAM Role for Lambda Execution
+resource "aws_iam_role" "lambda_role" {
+  name = "new_lambda_execution_role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -103,9 +20,85 @@ resource "aws_iam_role" "lambda_exec" {
   })
 }
 
-# IAM Policy for Lambda
-resource "aws_iam_policy_attachment" "lambda_policy_attach" {
-  name       = "lambda_policy_attachment"
-  roles      = [aws_iam_role.lambda_exec.name]
+# Attach Basic Execution Policy to IAM Role
+resource "aws_iam_policy_attachment" "lambda_basic_execution" {
+  name       = "lambda_execution_policy_attachment"
+  roles      = [aws_iam_role.lambda_role.name]
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+# Create Lambda Function
+resource "aws_lambda_function" "puran_lambda" {
+  function_name = "puran_function"
+  handler       = "index.handler"
+  runtime       = "nodejs18.x"
+  role          = aws_iam_role.lambda_role.arn
+  filename      = "lambda.zip"
+}
+
+# Request an ACM Certificate for API Gateway
+resource "aws_acm_certificate" "api_cert" {
+  domain_name       = "puran.com"
+  validation_method = "DNS"
+}
+
+# Create an API Gateway Custom Domain Name
+resource "aws_api_gateway_domain_name" "my_custom_domain" {
+  domain_name              = "puran.com"
+  regional_certificate_arn = aws_acm_certificate.api_cert.arn
+  endpoint_configuration {
+    types = ["EDGE"]
+  }
+}
+
+# Create a REST API in API Gateway
+resource "aws_api_gateway_rest_api" "puran_api" {
+  name        = "puran_api"
+  description = "API for Puran services"
+}
+
+# API Gateway Deployment
+resource "aws_api_gateway_deployment" "puran_api_deployment" {
+  depends_on = [aws_api_gateway_rest_api.puran_api]
+
+  rest_api_id = aws_api_gateway_rest_api.puran_api.id
+  stage_name  = "prod"
+}
+
+# API Gateway Lambda Integration
+resource "aws_api_gateway_resource" "proxy" {
+  rest_api_id = aws_api_gateway_rest_api.puran_api.id
+  parent_id   = aws_api_gateway_rest_api.puran_api.root_resource_id
+  path_part   = "{proxy+}"
+}
+
+resource "aws_api_gateway_method" "proxy_method" {
+  rest_api_id   = aws_api_gateway_rest_api.puran_api.id
+  resource_id   = aws_api_gateway_resource.proxy.id
+  http_method   = "ANY"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_integration" "lambda_integration" {
+  rest_api_id             = aws_api_gateway_rest_api.puran_api.id
+  resource_id             = aws_api_gateway_resource.proxy.id
+  http_method             = aws_api_gateway_method.proxy_method.http_method
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.puran_lambda.invoke_arn
+}
+
+# API Gateway Stage
+resource "aws_api_gateway_stage" "puran_stage" {
+  stage_name    = "prod"
+  rest_api_id   = aws_api_gateway_rest_api.puran_api.id
+  deployment_id = aws_api_gateway_deployment.puran_api_deployment.id
+}
+
+# Lambda Permission for API Gateway Invocation
+resource "aws_lambda_permission" "api_gateway_permission" {
+  statement_id  = "AllowAPIGatewayInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.puran_lambda.function_name
+  principal     = "apigateway.amazonaws.com"
 }
