@@ -1,14 +1,14 @@
-variable "aws_region" {
-  description = "AWS region"
-  default     = "us-east-1"
+output "api_gateway_url" {
+  description = "The API Gateway Invoke URL"
+  value       = aws_apigatewayv2_stage.puran_stage.invoke_url
 }
 
-variable "domain_name" {
-  description = "The custom domain for API Gateway"
-  default     = "puran.com"
+output "custom_domain_url" {
+  description = "The custom domain URL for API Gateway"
+  value       = "https://${aws_apigatewayv2_domain_name.puran_domain.domain_name}"
 }
 
-variable "lambda_function_name" {
-  description = "The Lambda function name"
-  default     = "puran_function"
+output "lambda_arn" {
+  description = "ARN of the deployed Lambda function"
+  value       = aws_lambda_function.puran_lambda.arn
 }
