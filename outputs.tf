@@ -1,11 +1,11 @@
+output "lambda_arn" {
+  value = aws_lambda_function.my_lambda.arn
+}
+
 output "api_gateway_url" {
-  value = aws_api_gateway_domain_name.custom_domain.domain_name
+  value = aws_api_gateway_rest_api.my_api.execution_arn
 }
 
-output "nlb_dns" {
-  value = aws_lb.my_nlb.dns_name
-}
-
-output "lambda_function_name" {
-  value = aws_lambda_function.my_lambda.function_name
+output "custom_domain" {
+  value = "https://${aws_route53_record.api_record.name}"
 }
